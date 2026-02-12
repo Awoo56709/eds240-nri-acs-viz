@@ -1,0 +1,238 @@
+---
+title: "HW3"
+format: html
+date: 2/10/26
+author: Joshua Ferrer-Lozano
+warning: false
+---
+
+# Load Libraries and Import Data
+
+```{r}
+# Import libraries
+#| warning: false
+#| message: false
+library(tidyverse) 
+library(janitor) 
+library(tidycensus) 
+library(here)
+```
+
+
+```{r}
+#| warning: false
+#| message: false
+#....Step 1a: see all available ACS variables + descriptions.....
+acs_vars <- tidycensus::load_variables(year = 2023,
+                                   dataset = "acs1")
+
+#..............Step 1b: import race & ethnicity data.............
+race_ethnicity <- tidycensus::get_acs(
+  geography = "county",
+  survey = "acs1",
+  # NOTE: you may not end up using all these variables
+  variables = c("B01003_001", "B02001_002", "B02001_003", 
+                "B02001_004", "B02001_005", "B02001_006",
+                "B02001_007", "B02001_008", "B03002_012",
+                "B03002_002"),
+  state = "CA", 
+  year = 2023) |>
+  # join variable descriptions (so we know what's what!)
+  dplyr::left_join(acs_vars, by = dplyr::join_by(variable == name)) 
+
+#.................Step 2: write ACS data to file.................
+readr::write_csv(race_ethnicity, here::here("data", "ACS-1yr-2023-county-race-ethnicity.csv"))
+
+#..................Step 3: read in your CSV file.................
+race_ethnicity <- readr::read_csv(here::here("data", "ACS-1yr-2023-county-race-ethnicity.csv"))
+```
+
+```{r}
+# Read NRI data
+nri <- read.csv("data/National_Risk_Index_Counties.csv")
+```
+
+# Wrangling NRI and ACS Code
+
+```{r}
+#| warning: false
+#| message: false
+# Clean ACS data
+acs_clean <- race_ethnicity |>
+  clean_names() |>
+  select(
+    county_fips = geoid,
+    variable,
+    estimate,
+    label
+  ) |>
+  # Map ACS variable codes to ethnicity categories
+  mutate(
+    race = case_when(
+      variable == "B02001_002" ~ "White",
+      variable == "B02001_003" ~ "Black or African American",
+      variable == "B02001_004" ~ "American Indian and Alaska Native",
+      variable == "B02001_005" ~ "Asian",
+      variable == "B02001_006" ~ "Native Hawaiian and Other Pacific Islander",
+      variable == "B02001_007" ~ "Some Other Race",
+      variable == "B02001_008" ~ "Two or More Races",
+      variable == "B03002_012" ~ "Hispanic or Latino",
+      variable == "B03002_002" ~ "NonHispanic",
+      variable == "B01003_001" ~ "TotalPop",
+      TRUE ~ NA
+    )
+  ) |>
+  drop_na(race) |>
+  select(county_fips, race, estimate) |>
+  # Reshape data to wide format
+  pivot_wider(names_from = race, values_from = estimate) |>
+  # Calculate proportions of each group relative to total population
+  mutate(
+    across(c(White, `Black or African American`, `American Indian and Alaska Native`, 
+             Asian, `Native Hawaiian and Other Pacific Islander`, `Some Other Race`, 
+             `Two or More Races`, `Hispanic or Latino`),
+           ~ .x / TotalPop)
+  )
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+
+# Clean NRI data and get risk rating
+nri_clean <- nri |>
+  clean_names() |>
+  mutate(
+    # Get 5 digit FIPS code by removing leading C character)
+    county_fips = str_sub(national_risk_index_id, 2, 6),
+    # Convert to character type
+    county_fips = as.character(county_fips)
+  ) |>
+  select(
+    county_fips,
+    risk_rating = national_risk_index_rating_composite
+  )
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+# Ensure FIPS codes are 5 digits due to C
+nri_clean |> 
+  summarise(min(nchar(county_fips)), max(nchar(county_fips)))
+
+```
+
+```{r}
+#| warning: false
+#| message: false
+# Join the ACS and NRI data
+joined <- acs_clean |>
+  inner_join(nri_clean, by = "county_fips")
+
+```
+
+```{r}
+# Verify counts
+joined |>  count()
+```
+
+```{r}
+#| warning: false
+#| message: false
+# Calculate % of each group in high-risk counties
+exposure <- joined |>
+  pivot_longer(
+    # Reshape to long format
+    cols = c(White, `Black or African American`, `American Indian and Alaska Native`, 
+             Asian, `Native Hawaiian and Other Pacific Islander`, `Some Other Race`, 
+             `Two or More Races`, `Hispanic or Latino`),
+    names_to = "group",
+    values_to = "prop"
+  ) |>
+  filter(prop > 0) |>  
+  group_by(group) |>
+  # Calculate population percentages in high risk counties
+  summarise(pct_high_risk = weighted.mean(
+    risk_rating %in% c("Very High", "Relatively High"), 
+    w = prop, 
+    na.rm = TRUE
+  ) * 100) |>
+  ungroup()
+```
+
+IV. Build your visualization
+Create a data viz that helps to answer the question, "How does climate hazard risk exposure vary across racial/ethnic groups in California?
+
+
+```{r}
+#| fig-alt: "A lollipop chart showing the percentage of each ethnic group living in high-risk counties in California. Native Hawaiian/Pacific Islander, Asian and Black/African American communities show the highest percentages in high-risk areas."
+#| fig-asp: 1
+#| warning: false
+#| message: false
+
+exposure |>
+  mutate(group = fct_reorder(group, pct_high_risk)) |>
+  ggplot(aes(x = group, y = pct_high_risk)) +
+  geom_segment(aes(xend = group, y = 0, yend = pct_high_risk),
+               color = "gray70", linewidth = 1) +
+  geom_point(size = 4, color = "#D55E00") +
+  coord_flip() +
+  labs(
+    title = "Climate Hazard Exposure Varies by Race and Ethnicity in California",
+    subtitle = "Percentage of each group living in high-risk counties",
+    x = NULL,
+    y = "Percent in High-Risk Counties (%)",
+    caption = "Data: FEMA National Risk Index (2023), ACS 1-year estimates (2023)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12,hjust = 1.2),
+    plot.subtitle = element_text(hjust = .5, size = 10), 
+    plot.margin = margin(t = 20, r = 20, b = 10, l = 10),
+    plot.caption = element_text(hjust = 1.5),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
+  )
+
+```
+# Answer some questions
+## 1. What are your variables of interest and what kinds of data (e.g. numeric, categorical, ordered, etc.) are they (a bullet point list is fine)?
+
+- Ethnicity groups (categorical)
+- County FIPS codes (categorical)
+- Population proportions by ethnicity (numeric, continuous)
+- Risk rating (categorical: Very Low, Relatively Low, Relatively Moderate, Relatively High, Very High)
+- Percent in high-risk counties (numeric, continuous)
+
+## 2. How did you decide which type of graphic form was best suited for answering the question? What alternative graphic forms could you have used instead? Why did you settle on this particular graphic form?
+
+I used a lollipop plot because it compares a single variable across multiple categories. Because the plot is ranked by percentages, this plot highlights the groups that face higher exposure. Other plots I wouldve considered include: 
+- A bar chart - however, its a bit boring
+- A dot plot - similar, but would not have the attached stem that would make it easier to follow which dot is for which group
+- A grouped bar chart that shows multiple risk levels - but may be a bit crowded. 
+
+The lollipop chart is simple and ordered by ranking by magnitude. Moreover, this plot provides a clean layout.
+
+## 3. Summarize your main finding in no more than two sentences.
+
+From the plot, Native Hawaiian/Pacific Islander, Asian, and Black/African American communities have the highest climate hazard exposure in California with over 80% living in high-risk counties. Whereas ethnic groups such as: Some Other Race, Hispanic or Latino, Two or More Races, American Indian/Alaska Native, and White groups show notably lower exposure rates between 60-80%.
+
+## 4. What modifications did you make to this visualization to make it more easily readable?
+
+- I Ordered groups by descending order
+
+- I used coord_flip() to display group names horizontally for readability
+
+- I removed gridlines to make it look more simple
+
+- I used a custom color instead of the default ggplot blue
+color
+- I added labels with a title that explains the main pattern and a subtitle explaining the metric
+
+## 5. Is there anything you wanted to implement, but didn’t know how? If so, please describe.
+
+I previously considered creating a grouped bar plot to illustrate risk levels across ethnic groups however thought it might be a bit busy and lose the main findings that would answer the question. 
+
